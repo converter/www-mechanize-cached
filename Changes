@@ -1,5 +1,16 @@
 Revision history for Perl extension WWW::Mechanize::Cached
 
+1.34    [ENHANCEMENTS]
+        * Added the $mech->disable_cache() and $mech->enable_cache() methods.
+        * Add constructor params:
+            pre_cache_fix_uri - Callback, replace session nonce in URL path with arbitrary string. 
+            response_post_cache_hook - A callback that is called with the HTTP::Response object
+                and can be used to replace expired headers and etc. in the response.
+            do_not_cache - Callback, called with the HTTP::Response object. If do_not_cache
+                returns true, the resource will not be cached.
+            cache_successful_only - Refuse to cache the response unless the HTTP::Response object's
+                is_success or is_redirect method returns true (http response code 2xx or 3xx).
+
 1.33
         * Now maintained by Olaf Alders.  Thanks to Andy Lester for offering
           to let me take this on.

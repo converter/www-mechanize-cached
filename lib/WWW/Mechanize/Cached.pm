@@ -54,11 +54,58 @@ cache object was to be initialized, but I think it makes more sense
 to have the user initialize the cache however she wants, and then
 pass it in.
 
+The I<pre_cache_fix_uri> parm is a reference to a subroutine that takes as
+its argument the request URI and is expected to return a valid URI.
+I<pre_cache_fix_uri> is called before the cache get and set operations.
+This callback can be used to replace session keys or other strings that
+appear in the URL path but are not treated as path parts by the server with
+an arbitrary string so that requests across multiple sessions set or get the
+same cached resource. I<response_post_cache_hook> can be used to replace
+the arbitrary string with a valid session key, for example, after
+fetching the response from cache.
+
+The I<response_post_cache_hook> parm is a reference to a subroutine that
+takes as its argument the HTTP::Response object fetched from cache.  This
+callback can be used to modify the response URI or replace headers in the
+cached response that would otherwise cause subsequent requests to fail.
+Headers that fall into this category might include session ID cookie
+headers.
+
+The I<do_not_cache> parm is a reference to a subroutine that takes
+the HTTP::Response object and returns true if the fetched object
+should be excluded from the cache. This callback can be used to prevent
+caching of error reponses that fail to include a proper response code
+(500, for example).
+
+If the I<cache_successful_only> parm is true, only responses which return true
+from calls to &HTTP::Response::is_success or &HTTP::Response::is_redirect are
+cached. See L<HTTP::Response> for more information.
+
 =cut
 
 sub new {
     my $class = shift;
     my %mech_args = @_;
+
+    my $pre_cache_fix_uri = delete $mech_args{pre_cache_fix_uri};
+    my $response_post_cache_hook = delete $mech_args{response_post_cache_hook};
+    my $do_not_cache = delete $mech_args{do_not_cache};
+    my $cache_successful_only = delete $mech_args{cache_successful_only};
+    if ($pre_cache_fix_uri) {
+        unless (ref $pre_cache_fix_uri eq 'CODE') {
+            croak "'pre_cache_fix_uri' parm must be a reference to a subroutine";
+        }
+    }
+    if ($response_post_cache_hook) {
+        unless (ref $response_post_cache_hook eq 'CODE') {
+            croak "'response_post_cache_hook' parm must be a reference to a subroutine";
+        }
+    }
+    if ($do_not_cache) {
+        unless (ref $do_not_cache eq 'CODE') {
+            croak "'do_not_cache' parm must be a reference to a subroutine";
+        }
+    }
 
     my $cache = delete $mech_args{cache};
     if ( $cache ) {
@@ -81,6 +128,10 @@ sub new {
     }
 
     $self->{$cache_key} = $cache;
+    $self->{pre_cache_fix_uri} = $pre_cache_fix_uri;
+    $self->{response_post_cache_hook} = $response_post_cache_hook;
+    $self->{do_not_cache} = $do_not_cache;
+    $self->{cache_successful_only} = $cache_successful_only;
 
     return $self;
 }
@@ -89,6 +140,18 @@ sub new {
 
 Most methods are provided by L<WWW::Mechanize>. See that module's
 documentation for details.
+
+=head2 disable_cache()
+
+Disable cache storage. All subsequent requests will ignore the cache entirely.
+
+=head2 enable_cache()
+
+Enable cache storage. All subsequent requests will attempt to fetch the
+response from cache before submitting the request to the server.
+
+NOTE: The cache is enabled by default, and can only be disabled by a call
+to disable_cache().
 
 =head2 is_cached()
 
@@ -103,15 +166,49 @@ sub is_cached {
     return $self->{_is_cached};
 }
 
+sub disable_cache {
+    my $self = shift;
+    $self->{__cache_disabled} = 1;
+    return;
+}
+
+sub enable_cache {
+    my $self = shift;
+    delete $self->{__cache_disabled};
+    return;
+}
+
+sub cache_enabled { $_[0]->{__cache_disabled} ? 0 : 1 }
+
 sub _make_request {
     my $self = shift;
     my $request = shift;
 
-    my $req = $request->as_string;
     my $cache = $self->{$cache_key};
-    my $response= $cache->get( $req );
+    my $key;
+
+    if ($self->{pre_cache_fix_uri}) {
+        # make a clone because we can't change the URI of the original,
+        # which would make the request point at an invalid resource.
+        my $clone = $request->clone;
+        $clone->uri($self->{pre_cache_fix_uri}->($clone->uri));
+        $key = $clone->as_string;
+    }
+    else {
+        $key = $request->as_string;
+    }
+
+    my $response;
+
+    unless ($self->{__cache_disabled}) {
+        $response = $cache->get( $key );
+    }
+
     if ( $response ) {
         $response = thaw $response;
+        if ($self->{response_post_cache_hook}) {
+            $self->{response_post_cache_hook}->($response);
+        }
         $self->{_is_cached} = 1;
     } else {
         $response = $self->SUPER::_make_request( $request, @_ );
@@ -119,8 +216,17 @@ sub _make_request {
         # http://rt.cpan.org/Public/Bug/Display.html?id=42693
         $response->decode();
         delete $response->{handlers};
-        
-        $cache->set( $req, freeze($response) );
+
+        unless ($self->{do_not_cache} && $self->{do_not_cache}->($response)) {
+            if ($self->{cache_successful_only}) {
+                if ($response->is_success || $response->is_redirect) {
+                    $cache->set( $key, freeze($response) );
+                }
+            }
+            else {
+                $cache->set( $key, freeze($response) );
+            }
+        }
         $self->{_is_cached} = 0;
     }
 
